@@ -483,6 +483,10 @@ func asFloat(v any) (float64, bool) {
 // API and Azure OpenAI support this. All other OpenAI-compatible providers
 // (Mistral, Gemini, DeepSeek, Groq, etc.) reject unknown fields with 422 errors.
 func supportsPromptCacheKey(apiBase string) bool {
-	return strings.Contains(apiBase, "api.openai.com") ||
-		strings.Contains(apiBase, "openai.azure.com")
+	u, err := url.Parse(apiBase)
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	return host == "api.openai.com" || strings.HasSuffix(host, ".openai.azure.com")
 }

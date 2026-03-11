@@ -669,7 +669,10 @@ func TestSerializeMessages_MediaWithToolCallID(t *testing.T) {
 	}
 }
 
-func TestProviderChat_PromptCacheKeySentToOpenAI(t *testing.T) {
+// chatWithCacheKey sets up a test server, sends a Chat request with prompt_cache_key,
+// and returns the decoded request body for assertion.
+func chatWithCacheKey(t *testing.T, apiBase string) map[string]any {
+	t.Helper()
 	var requestBody map[string]any
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -690,13 +693,10 @@ func TestProviderChat_PromptCacheKeySentToOpenAI(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// Simulate an OpenAI endpoint by overriding the apiBase after creation.
 	p := NewProvider("key", server.URL, "")
-	p.apiBase = "https://api.openai.com/v1"
-	// Point the HTTP client at our test server instead.
+	p.apiBase = apiBase
 	p.httpClient = &http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			// Redirect all requests to the test server.
 			r.URL, _ = url.Parse(server.URL + r.URL.Path)
 			return http.DefaultTransport.RoundTrip(r)
 		}),
@@ -706,14 +706,19 @@ func TestProviderChat_PromptCacheKeySentToOpenAI(t *testing.T) {
 		t.Context(),
 		[]Message{{Role: "user", Content: "hi"}},
 		nil,
-		"gpt-4o",
+		"test-model",
 		map[string]any{"prompt_cache_key": "agent-main"},
 	)
 	if err != nil {
 		t.Fatalf("Chat() error = %v", err)
 	}
-	if requestBody["prompt_cache_key"] != "agent-main" {
-		t.Fatalf("prompt_cache_key = %v, want %q", requestBody["prompt_cache_key"], "agent-main")
+	return requestBody
+}
+
+func TestProviderChat_PromptCacheKeySentToOpenAI(t *testing.T) {
+	body := chatWithCacheKey(t, "https://api.openai.com/v1")
+	if body["prompt_cache_key"] != "agent-main" {
+		t.Fatalf("prompt_cache_key = %v, want %q", body["prompt_cache_key"], "agent-main")
 	}
 }
 
@@ -732,46 +737,8 @@ func TestProviderChat_PromptCacheKeyOmittedForNonOpenAI(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var requestBody map[string]any
-
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				resp := map[string]any{
-					"choices": []map[string]any{
-						{
-							"message":       map[string]any{"content": "ok"},
-							"finish_reason": "stop",
-						},
-					},
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(resp)
-			}))
-			defer server.Close()
-
-			p := NewProvider("key", server.URL, "")
-			p.apiBase = tt.apiBase
-			p.httpClient = &http.Client{
-				Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-					r.URL, _ = url.Parse(server.URL + r.URL.Path)
-					return http.DefaultTransport.RoundTrip(r)
-				}),
-			}
-
-			_, err := p.Chat(
-				t.Context(),
-				[]Message{{Role: "user", Content: "hi"}},
-				nil,
-				"test-model",
-				map[string]any{"prompt_cache_key": "agent-main"},
-			)
-			if err != nil {
-				t.Fatalf("Chat() error = %v", err)
-			}
-			if _, exists := requestBody["prompt_cache_key"]; exists {
+			body := chatWithCacheKey(t, tt.apiBase)
+			if _, exists := body["prompt_cache_key"]; exists {
 				t.Fatalf("prompt_cache_key should NOT be sent to %s, but was included in request", tt.name)
 			}
 		})
@@ -793,6 +760,12 @@ func TestSupportsPromptCacheKey(t *testing.T) {
 		{"https://api.groq.com/openai/v1", false},
 		{"http://localhost:11434/v1", false},
 		{"https://openrouter.ai/api/v1", false},
+		// Edge cases: proxy URLs with openai.com in path should NOT match
+		{"https://my-proxy.com/api.openai.com/v1", false},
+		{"https://proxy.example.com/openai.azure.com/v1", false},
+		// Malformed or empty
+		{"", false},
+		{"not-a-url", false},
 	}
 	for _, tt := range tests {
 		if got := supportsPromptCacheKey(tt.apiBase); got != tt.want {
